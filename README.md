@@ -55,7 +55,7 @@ Created/Maintained by [Arash Keshmirian](https://github.com/keshmirian)
 
 # Installation
 
-1. Download the latest release from [GitHub Releases](https://github.com/keshmirian/gauss-cannon/releases)
+1. Download the latest release from [GitHub Releases](https://github.com/warpgatelabs/gauss-cannon/releases)
 2. In Blender, go to `Edit > Preferences > Get Extensions`
 3. Click the dropdown menu in the top-right of the panel and choose `Install from Disk...`
 4. Select the downloaded `.zip` file
@@ -263,7 +263,9 @@ This project is licensed under the GPL v3.0 License - see the [LICENSE](LICENSE)
 
 Arash Keshmirian - [GitHub](https://github.com/keshmirian)
 
-Project Link: [https://github.com/keshmirian/gauss-cannon](https://github.com/keshmirian/gauss-cannon)
+Project Link: [https://github.com/warpgatelabs/gauss-cannon](https://github.com/warpgatelabs/gauss-cannon)
+
+More from Warpgate Labs, including Splatcatcher and RSR: [warp-gate.com](https://warp-gate.com)
 
 ---
 
