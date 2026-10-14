@@ -10,6 +10,7 @@ from ..utils.ray_casting import (
 )
 from ..utils.ply import write_ply_bulk
 from ..utils.colmap import SPARSE_FOLDER, write_points3d_bin
+from ..utils.compositor_passes import pass_outputs_muted
 
 
 def helper_mesh_objects(scene):
@@ -112,8 +113,9 @@ class EXPORT_OT_pointcloud_ply(bpy.types.Operator):
         scene.render.filepath = temp_path
 
         try:
-            # Render frame
-            bpy.ops.render.render(write_still=True)
+            # Render frame, without writing low-resolution depth/normal passes
+            with pass_outputs_muted(scene):
+                bpy.ops.render.render(write_still=True)
 
             # Load rendered image
             img = bpy.data.images.load(temp_path)

@@ -32,6 +32,20 @@ def iter_action_fcurves(animation_data):
                 yield fc
 
 
+def _is_animated(id_data):
+    """True if an ID's properties can change per frame: action F-curves,
+    drivers or NLA strips."""
+    anim = id_data.animation_data
+    return bool(
+        anim
+        and (
+            any(True for _ in iter_action_fcurves(anim))
+            or len(anim.drivers) > 0
+            or len(anim.nla_tracks) > 0
+        )
+    )
+
+
 def build_fast_path_evaluator(camera):
     """
     Build a frame -> world-matrix evaluator that bypasses scene.frame_set.
@@ -45,18 +59,26 @@ def build_fast_path_evaluator(camera):
     scene.frame_set + camera.matrix_world.
     """
     # Anything that makes matrix_world depend on more than the camera's own
-    # local transform forces the slow path.
+    # keyframed local transform forces the slow path.
     if camera.parent is not None:
         return None
     if len(camera.constraints) > 0:
         return None
     if camera.rotation_mode != "XYZ":
         return None
-    cam_anim = camera.data.animation_data
-    if cam_anim and any(True for _ in iter_action_fcurves(cam_anim)):
+    if any(camera.delta_location) or any(camera.delta_rotation_euler):
+        return None
+    if tuple(camera.delta_scale) != (1.0, 1.0, 1.0):
+        return None
+    if _is_animated(camera.data):
         # Animated intrinsics (lens, sensor, clip): we'd need depsgraph eval
         return None
-    if not camera.animation_data or not camera.animation_data.action:
+    anim = camera.animation_data
+    if not anim or not anim.action:
+        return None
+    if len(anim.drivers) > 0 or len(anim.nla_tracks) > 0:
+        return None
+    if anim.action_influence != 1.0 or anim.action_blend_type != "REPLACE":
         return None
 
     needed = {
@@ -67,11 +89,16 @@ def build_fast_path_evaluator(camera):
         ("rotation_euler", 1): None,
         ("rotation_euler", 2): None,
     }
-    for fc in iter_action_fcurves(camera.animation_data):
+    for fc in iter_action_fcurves(anim):
         key = (fc.data_path, fc.array_index)
         if key in needed:
             needed[key] = fc
+        elif fc.data_path.startswith("delta_"):
+            return None
     if any(fc is None for fc in needed.values()):
+        return None
+    # Keyframe values are only what renders if nothing reshapes the curve
+    if any(fc.mute or len(fc.modifiers) > 0 for fc in needed.values()):
         return None
 
     def to_dict(fc):
@@ -99,20 +126,75 @@ def build_fast_path_evaluator(camera):
     return evaluate
 
 
-def camera_matrices_for_frames(scene, camera, frames):
-    """
-    Camera world matrices for each frame, via the fast path when possible.
+def render_resolution(scene):
+    """Rendered image size in pixels, after the resolution percentage."""
+    render = scene.render
+    return (
+        render.resolution_x * render.resolution_percentage // 100,
+        render.resolution_y * render.resolution_percentage // 100,
+    )
 
-    Falls back to scene.frame_set per frame and restores the current frame
-    afterwards.
+
+def pinhole_intrinsics(cam_data, width, height, pixel_aspect=(1.0, 1.0)):
+    """
+    Pixel intrinsics (fx, fy, cx, cy) of a perspective camera, with cx/cy in
+    OpenCV image coordinates (origin top-left, y down).
+
+    Follows Blender's viewplane (BKE_camera_params_compute_viewplane): honors
+    sensor_fit (unlike deriving fy from sensor_height, which Blender ignores
+    under AUTO/HORIZONTAL fit), lens shift and non-square pixels. With square
+    pixels and no shift this is LichtFeld's convention:
+    focal = 0.5 * resolution / tan(0.5 * fov).
+
+    Args:
+        cam_data: Camera data (or anything with sensor_fit, angle, shift_x,
+                  shift_y)
+        width, height: Rendered image size in pixels
+        pixel_aspect: (pixel_aspect_x, pixel_aspect_y) from the render settings
+    """
+    aspect_x, aspect_y = pixel_aspect
+    # Pixel height in units of pixel width
+    ycor = aspect_y / aspect_x
+    fit = cam_data.sensor_fit
+    if fit == "AUTO":
+        fit = "HORIZONTAL" if aspect_x * width >= aspect_y * height else "VERTICAL"
+    # Image extent, in pixel widths, that the camera angle and shift span
+    viewfac = width if fit == "HORIZONTAL" else ycor * height
+
+    fx = 0.5 * viewfac / np.tan(0.5 * cam_data.angle)
+    fy = fx / ycor
+    # Shift moves the frustum, so the optical axis moves the other way in the
+    # image (left for +x; down, i.e. +y in OpenCV rows, for +y)
+    cx = 0.5 * width - cam_data.shift_x * viewfac
+    cy = 0.5 * height + cam_data.shift_y * viewfac / ycor
+    return fx, fy, cx, cy
+
+
+def evaluate_camera(scene, camera, frames):
+    """
+    Camera world matrix and pinhole intrinsics at each frame, as rendered.
+
+    Uses the keyframe fast path when possible, otherwise scene.frame_set per
+    frame (restoring the current frame afterwards). Intrinsics are evaluated
+    per frame when the camera data (lens, sensor, shift) is animated.
 
     Returns:
-        dict: frame -> Matrix (4x4 world matrix)
+        tuple: (dict frame -> Matrix (4x4 world matrix),
+                dict frame -> (fx, fy, cx, cy))
     """
+    width, height = render_resolution(scene)
+    pixel_aspect = (scene.render.pixel_aspect_x, scene.render.pixel_aspect_y)
+    animated_data = _is_animated(camera.data)
+    # The fast path refuses animated camera data, so frame_set runs before
+    # every per-frame intrinsics read below
     fast_eval = build_fast_path_evaluator(camera)
+    static_intrinsics = (
+        None if animated_data else pinhole_intrinsics(camera.data, width, height, pixel_aspect)
+    )
+
     orig_frame = scene.frame_current
     moved = False
-    matrices = {}
+    matrices, intrinsics = {}, {}
     for frame_idx in frames:
         matrix = fast_eval(frame_idx) if fast_eval is not None else None
         if matrix is None:
@@ -120,35 +202,10 @@ def camera_matrices_for_frames(scene, camera, frames):
             moved = True
             matrix = camera.matrix_world.copy()
         matrices[frame_idx] = matrix
+        if animated_data:
+            intrinsics[frame_idx] = pinhole_intrinsics(camera.data, width, height, pixel_aspect)
+        else:
+            intrinsics[frame_idx] = static_intrinsics
     if moved:
         scene.frame_set(orig_frame)
-    return matrices
-
-
-def angle_based_intrinsics(cam_data, width, height):
-    """
-    Pixel focal lengths and FOVs from Blender's actual camera angle.
-
-    Honors sensor_fit, unlike deriving fy from sensor_height (which Blender
-    ignores under AUTO/HORIZONTAL fit). Matches LichtFeld's convention:
-    focal = 0.5 * resolution / tan(0.5 * fov).
-
-    Returns:
-        tuple: (fx, fy, fov_x, fov_y)
-    """
-    if cam_data.sensor_fit == 'HORIZONTAL' or (cam_data.sensor_fit == 'AUTO' and width >= height):
-        # Horizontal FOV is the reference
-        fov_x = cam_data.angle
-        # Calculate vertical FOV from horizontal
-        aspect_ratio = height / width
-        fov_y = 2.0 * np.arctan(np.tan(fov_x / 2.0) * aspect_ratio)
-    else:
-        # Vertical FOV is the reference
-        fov_y = cam_data.angle
-        # Calculate horizontal FOV from vertical
-        aspect_ratio = width / height
-        fov_x = 2.0 * np.arctan(np.tan(fov_y / 2.0) * aspect_ratio)
-
-    fx = 0.5 * width / np.tan(0.5 * fov_x)
-    fy = 0.5 * height / np.tan(0.5 * fov_y)
-    return fx, fy, fov_x, fov_y
+    return matrices, intrinsics

@@ -7,6 +7,7 @@ produces the passes without any add-on code running. The EXRs are converted
 to the trainer-ready PNGs afterwards (see geometry_maps.py).
 """
 import os
+from contextlib import contextmanager
 import bpy
 
 
@@ -22,7 +23,8 @@ _RLAYERS_NODE = f"{_NODE_PREFIX} Render Layers"
 _GROUP_NAME = "Gauss Cannon Passes"
 # ID property tagging a compositor group created by us (safe to delete)
 _OWNED_GROUP_KEY = "gauss_cannon_owned"
-# Scene ID property recording pass toggles before we enabled them
+# Scene ID property recording pass and compositing toggles before we enabled
+# them
 _PRIOR_PASSES_KEY = "gauss_cannon_prior_passes"
 
 
@@ -47,10 +49,13 @@ def _enable_passes(scene, view_layer):
             "view_layer": view_layer.name,
             "use_pass_z": view_layer.use_pass_z,
             "use_pass_normal": view_layer.use_pass_normal,
+            "use_compositing": scene.render.use_compositing,
         }
     # Always both: depth masking relies on the normal pass
     view_layer.use_pass_z = True
     view_layer.use_pass_normal = True
+    # The File Output nodes only run when the render is composited
+    scene.render.use_compositing = True
 
 
 def _restore_passes(scene):
@@ -61,6 +66,9 @@ def _restore_passes(scene):
     if view_layer is not None:
         view_layer.use_pass_z = bool(prior["use_pass_z"])
         view_layer.use_pass_normal = bool(prior["use_pass_normal"])
+    # Missing from records saved by earlier development builds
+    if "use_compositing" in prior:
+        scene.render.use_compositing = bool(prior["use_compositing"])
     del scene[_PRIOR_PASSES_KEY]
 
 
@@ -118,6 +126,24 @@ def apply(scene, passes_dir):
         if not node.inputs[0].is_linked:
             tree.links.new(rlayers.outputs[pass_name], node.inputs[0])
         node.directory = os.path.join(passes_dir, subfolder, "")
+
+
+@contextmanager
+def pass_outputs_muted(scene):
+    """Stop our File Output nodes writing passes for renders that aren't
+    dataset frames (e.g. the point cloud's low-resolution renders)."""
+    tree = scene.compositing_node_group
+    nodes = []
+    if tree is not None:
+        nodes = [tree.nodes.get(_file_output_name(p)) for p in PASS_OUTPUTS]
+    prior = [(node, node.mute) for node in nodes if node is not None]
+    for node, _ in prior:
+        node.mute = True
+    try:
+        yield
+    finally:
+        for node, mute in prior:
+            node.mute = mute
 
 
 def remove(scene):

@@ -6,6 +6,7 @@ from ..utils.ray_casting import (
     is_geometry_within_near_clip,
     build_visible_mesh_bvh_cache,
 )
+from ..utils.compositor_passes import maps_enabled
 from ..utils.output_paths import sync_render_outputs
 from .export_geometry_maps import conversion_progress
 
@@ -196,14 +197,40 @@ def _on_render_cancel(*args):
     _remove_convert_handlers()
 
 
+def _report_conversion_failure(message):
+    """Show why the automatic conversion didn't run; a timer has no operator
+    to report through."""
+    message = f"Depth/normal maps not converted: {message}"
+    print(f"Gauss Cannon: {message}")
+    wm = bpy.context.window_manager
+    # Popups crash Blender in background (-b) mode, which still has windows
+    if wm.windows and not bpy.app.background:
+        with bpy.context.temp_override(window=wm.windows[0]):
+            wm.popup_menu(
+                lambda menu, _context: menu.layout.label(text=message),
+                title="Gauss Cannon",
+                icon="ERROR",
+            )
+
+
 def _convert_passes_after_render():
     windows = bpy.context.window_manager.windows
-    if windows:
-        # Invoke to convert in the background with progress in the UI
-        with bpy.context.temp_override(window=windows[0]):
-            bpy.ops.export.geometry_maps("INVOKE_DEFAULT")
-    else:
-        bpy.ops.export.geometry_maps()
+    interactive = bool(windows) and not bpy.app.background
+    override = {"window": windows[0]} if interactive else {}
+    try:
+        with bpy.context.temp_override(**override):
+            if not bpy.ops.export.geometry_maps.poll():
+                # Settings changed while the animation rendered
+                _report_conversion_failure(
+                    "check the camera, output folder and map toggles, "
+                    "then use Convert Rendered Passes"
+                )
+                return None
+            # Invoke to convert in the background with progress in the UI
+            bpy.ops.export.geometry_maps("INVOKE_DEFAULT" if interactive else "EXEC_DEFAULT")
+    except RuntimeError as e:
+        # The operator reported an error (e.g. no passes found)
+        _report_conversion_failure(str(e).strip().removeprefix("Error: "))
     return None
 
 
@@ -222,6 +249,7 @@ class RENDER_OT_animation_to_export(bpy.types.Operator):
             and context.scene.output_folder.strip()
             # A new render would overwrite the passes being converted
             and conversion_progress() is None
+            and not bpy.app.is_job_running("RENDER")
         )
 
     def execute(self, context):
@@ -233,20 +261,29 @@ class RENDER_OT_animation_to_export(bpy.types.Operator):
         if not os.path.exists(images_dir):
             os.makedirs(images_dir)
 
-        maps_enabled = scene.export_depth_maps or scene.export_normal_maps
-        if maps_enabled and scene.render.engine == "BLENDER_WORKBENCH":
+        convert_maps = maps_enabled(scene)
+        if convert_maps and scene.render.engine == "BLENDER_WORKBENCH":
             self.report({"ERROR"}, "Depth/normal maps need Cycles or EEVEE")
             return {"CANCELLED"}
 
         sync_render_outputs(scene)
 
-        if maps_enabled:
+        if convert_maps:
             # Convert the EXR passes to PNGs once the whole animation is done
             _remove_convert_handlers()
             bpy.app.handlers.render_complete.append(_on_render_complete)
             bpy.app.handlers.render_cancel.append(_on_render_cancel)
 
         # INVOKE_DEFAULT opens the render window with progress, like Render > Render Animation
-        bpy.ops.render.render('INVOKE_DEFAULT', animation=True)
+        try:
+            result = bpy.ops.render.render('INVOKE_DEFAULT', animation=True)
+        except RuntimeError as e:
+            result = {"CANCELLED"}
+            self.report({"ERROR"}, str(e).strip())
+        if "CANCELLED" in result:
+            # The render never started, so the handlers would fire on the
+            # next unrelated render instead
+            _remove_convert_handlers()
+            return {"CANCELLED"}
 
         return {"FINISHED"}

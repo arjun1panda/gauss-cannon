@@ -1,11 +1,7 @@
 import bpy
 import os
 import numpy as np
-from ..utils.camera_eval import (
-    angle_based_intrinsics,
-    camera_matrices_for_frames,
-    iter_action_fcurves,
-)
+from ..utils.camera_eval import evaluate_camera, render_resolution
 from ..utils.colmap import (
     SPARSE_FOLDER,
     colmap_pose,
@@ -13,13 +9,7 @@ from ..utils.colmap import (
     write_images_bin,
     write_points3d_bin,
 )
-from ..utils.output_paths import render_image_extension
-
-
-def pinhole_params(cam_data, width, height):
-    """COLMAP PINHOLE parameters (fx, fy, cx, cy) for the rendered image size."""
-    fx, fy, _, _ = angle_based_intrinsics(cam_data, width, height)
-    return (fx, fy, width / 2.0, height / 2.0)
+from ..utils.output_paths import render_image_extension, rendered_frames
 
 
 class EXPORT_OT_colmap(bpy.types.Operator):
@@ -40,27 +30,12 @@ class EXPORT_OT_colmap(bpy.types.Operator):
     def execute(self, context):
         scene = context.scene
         camera = scene.camera
-        render = scene.render
 
         # Same frames and file names Render Animation produces
-        frames = list(range(scene.frame_start, scene.frame_end + 1, scene.frame_step))
-        width = render.resolution_x * render.resolution_percentage // 100
-        height = render.resolution_y * render.resolution_percentage // 100
+        frames = rendered_frames(scene)
+        width, height = render_resolution(scene)
         ext = render_image_extension(scene)
-
-        if any(True for _ in iter_action_fcurves(camera.data.animation_data)):
-            # Animated lens/sensor: evaluate intrinsics per frame
-            orig_frame = scene.frame_current
-            matrices, intrinsics = {}, {}
-            for frame_idx in frames:
-                scene.frame_set(frame_idx)
-                matrices[frame_idx] = camera.matrix_world.copy()
-                intrinsics[frame_idx] = pinhole_params(camera.data, width, height)
-            scene.frame_set(orig_frame)
-        else:
-            matrices = camera_matrices_for_frames(scene, camera, frames)
-            params = pinhole_params(camera.data, width, height)
-            intrinsics = dict.fromkeys(frames, params)
+        matrices, intrinsics = evaluate_camera(scene, camera, frames)
 
         # One COLMAP camera per distinct set of intrinsics (usually just one)
         cameras = []

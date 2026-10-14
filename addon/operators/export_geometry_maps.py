@@ -2,18 +2,19 @@ import bpy
 import os
 import json
 import threading
-import types
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from ..utils.camera_eval import angle_based_intrinsics, camera_matrices_for_frames
-from ..utils.compositor_passes import PASSES_FOLDER
+from ..utils.camera_eval import evaluate_camera, render_resolution
+from ..utils.compositor_passes import PASSES_FOLDER, maps_enabled
 from ..utils.geometry_maps import (
     convert_frame,
     max_valid_depth,
     read_exr,
+    remove_stale_maps,
     scan_pass_frames,
     write_png,
 )
+from ..utils.output_paths import rendered_frames
 
 # EXR decoding and PNG encoding run inside OpenImageIO with the GIL released,
 # so frames convert in parallel on threads. Each worker holds about one
@@ -40,15 +41,31 @@ class ConversionJob:
     operator runs it on a background thread and polls the progress fields.
     """
 
-    def __init__(self, frames, complete, matrices, cam_data, output_dir, want_depth, want_normals):
+    def __init__(
+        self,
+        frames,
+        complete,
+        expected,
+        matrices,
+        intrinsics,
+        clip_end,
+        size,
+        output_dir,
+        want_depth,
+        want_normals,
+    ):
         self.frames = frames
         self.complete = complete
+        # Frames Render Animation renders, which images.bin lists
+        self.expected = expected
         # Main-thread snapshots of the bpy data the workers need
         self.cam_to_world = {
             f: np.array(matrices[f].to_3x3().normalized()) for f in complete
         }
-        self.camera = types.SimpleNamespace(sensor_fit=cam_data.sensor_fit, angle=cam_data.angle)
-        self.clip_end = cam_data.clip_end
+        self.intrinsics = intrinsics
+        self.clip_end = clip_end
+        # (width, height) the intrinsics are for
+        self.size = size
         self.output_dir = output_dir
         self.depths_dir = os.path.join(output_dir, "depths")
         self.normals_dir = os.path.join(output_dir, "normals")
@@ -83,6 +100,7 @@ class ConversionJob:
             ):
                 if wanted:
                     os.makedirs(folder, exist_ok=True)
+                    remove_stale_maps(folder, self.complete)
 
             # Rewriting the maps invalidates any earlier run's metadata (its
             # depth scale may differ), so don't leave it behind if this run
@@ -142,23 +160,34 @@ class ConversionJob:
             raise
         return results
 
+    def _read_pass(self, frame_idx, subfolder, channels):
+        pixels = read_exr(self.frames[frame_idx][subfolder], channels)
+        height, width = pixels.shape[:2]
+        if (width, height) != self.size:
+            # Intrinsics and images.bin assume the render resolution
+            raise ValueError(
+                f"Frame {frame_idx}'s {subfolder} pass is {width}x{height}, but the "
+                f"render is {self.size[0]}x{self.size[1]}; render the animation again"
+            )
+        return pixels
+
     def _frame_max_depth(self, frame_idx):
-        depth = read_exr(self.frames[frame_idx]["depth"], 1)[..., 0]
+        depth = self._read_pass(frame_idx, "depth", 1)[..., 0]
         return max_valid_depth(depth, self.clip_end)
 
     def _convert_frame(self, frame_idx):
-        depth = read_exr(self.frames[frame_idx]["depth"], 1)[..., 0]
-        normal = read_exr(self.frames[frame_idx]["normal"], 3)
-        height, width = depth.shape
-        fx, fy, _, _ = angle_based_intrinsics(self.camera, width, height)
+        depth = self._read_pass(frame_idx, "depth", 1)[..., 0]
+        normal = self._read_pass(frame_idx, "normal", 3)
 
         depth_png, normal_png = convert_frame(
             depth,
             normal,
             self.cam_to_world[frame_idx],
-            (fx, fy, width / 2.0, height / 2.0),
+            self.intrinsics[frame_idx],
             self.depth_scale,
             self.clip_end,
+            self.want_depth,
+            self.want_normals,
         )
 
         # Same naming as the rendered images/ and images.bin
@@ -223,7 +252,7 @@ class EXPORT_OT_geometry_maps(bpy.types.Operator):
             _active_job is None
             and scene.camera
             and scene.output_folder.strip()
-            and (scene.export_depth_maps or scene.export_normal_maps)
+            and maps_enabled(scene)
         )
 
     def _prepare(self, context):
@@ -234,17 +263,28 @@ class EXPORT_OT_geometry_maps(bpy.types.Operator):
         output_dir = bpy.path.abspath(scene.output_folder)
         passes_dir = os.path.join(output_dir, PASSES_FOLDER)
 
-        frames = scan_pass_frames(passes_dir)
-        complete = sorted(f for f, paths in frames.items() if len(paths) == 2)
+        # Only the current frame range: passes outside it are left over from
+        # an earlier render and have no images.bin entry
+        expected = rendered_frames(scene)
+        scanned = scan_pass_frames(passes_dir)
+        frames = {f: scanned[f] for f in expected if f in scanned}
+        complete = [f for f in expected if len(frames.get(f, {})) == 2]
         if not complete:
-            self.report({"ERROR"}, f"No rendered depth/normal passes found in {passes_dir}")
+            self.report(
+                {"ERROR"},
+                f"No rendered depth/normal passes for frames {scene.frame_start}-{scene.frame_end} in {passes_dir}",
+            )
             return None
 
+        matrices, intrinsics = evaluate_camera(scene, camera, complete)
         return ConversionJob(
             frames,
             complete,
-            camera_matrices_for_frames(scene, camera, complete),
-            camera.data,
+            expected,
+            matrices,
+            intrinsics,
+            camera.data.clip_end,
+            render_resolution(scene),
             output_dir,
             scene.export_depth_maps,
             scene.export_normal_maps,
@@ -266,8 +306,12 @@ class EXPORT_OT_geometry_maps(bpy.types.Operator):
             for label, wanted in (("depth", job.want_depth), ("normal", job.want_normals))
             if wanted
         )
-        skipped = len(job.frames) - len(job.complete)
-        skipped_msg = f" ({skipped} frame(s) missing a pass were skipped)" if skipped else ""
+        skipped = len(job.expected) - len(job.complete)
+        skipped_msg = (
+            f" ({skipped} frame(s) in the range had no complete passes and were skipped)"
+            if skipped
+            else ""
+        )
         self.report(
             {"WARNING" if skipped else "INFO"},
             f"Wrote {written} maps for {len(job.complete)} frames to {job.output_dir}{skipped_msg}",

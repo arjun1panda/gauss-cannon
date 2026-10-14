@@ -15,6 +15,8 @@ import OpenImageIO as oiio
 
 
 _FRAME_RE = re.compile(r"(\d+)\.exr$", re.IGNORECASE)
+# Converted maps, named like the rendered images: 0001.png
+_MAP_NAME_RE = re.compile(r"^(\d+)\.png$", re.IGNORECASE)
 
 # Blender's Z pass holds a far value on background pixels (1e10 in Cycles,
 # about clip_end in EEVEE); treat anything this close to clip_end as empty.
@@ -48,6 +50,18 @@ def scan_pass_frames(passes_dir, subfolders=("depth", "normal")):
             if match:
                 frames.setdefault(int(match.group(1)), {})[subfolder] = os.path.join(folder, name)
     return frames
+
+
+def remove_stale_maps(folder, frames):
+    """Delete NNNN.png maps in ``folder`` for frames not in ``frames``, left
+    over from an earlier render with a different frame range."""
+    if not os.path.isdir(folder):
+        return
+    keep = set(frames)
+    for name in os.listdir(folder):
+        match = _MAP_NAME_RE.match(name)
+        if match and int(match.group(1)) not in keep:
+            os.remove(os.path.join(folder, name))
 
 
 def read_exr(path, channels):
@@ -96,7 +110,16 @@ def max_valid_depth(depth, clip_end):
     return float(depth[valid].max()) if valid.any() else None
 
 
-def convert_frame(depth, normal_world, cam_to_world, intrinsics, depth_scale, clip_end):
+def convert_frame(
+    depth,
+    normal_world,
+    cam_to_world,
+    intrinsics,
+    depth_scale,
+    clip_end,
+    want_depth=True,
+    want_normals=True,
+):
     """
     Encode one frame's passes.
 
@@ -107,16 +130,23 @@ def convert_frame(depth, normal_world, cam_to_world, intrinsics, depth_scale, cl
         intrinsics: (fx, fy, cx, cy) in pixels
         depth_scale: Multiplier mapping depth to uint16 values
         clip_end: Camera far clip, for detecting background
+        want_depth, want_normals: Which maps to encode; the other is None
 
     Returns:
-        tuple: (uint16 (H, W) depth PNG data, uint8 (H, W, 3) normal PNG data)
+        tuple: (uint16 (H, W) depth PNG data or None,
+                uint8 (H, W, 3) normal PNG data or None)
     """
     height, width = depth.shape
     lengths = np.linalg.norm(normal_world, axis=-1)
     valid = depth_valid_mask(depth, clip_end) & (lengths >= _MIN_NORMAL_LENGTH)
 
-    depth_out = np.zeros((height, width), dtype=np.uint16)
-    depth_out[valid] = np.clip(np.rint(depth[valid] * depth_scale), 1, 65535)
+    depth_out = None
+    if want_depth:
+        depth_out = np.zeros((height, width), dtype=np.uint16)
+        depth_out[valid] = np.clip(np.rint(depth[valid] * depth_scale), 1, 65535)
+
+    if not want_normals:
+        return depth_out, None
 
     # World -> camera (row vectors: n @ R == R.T @ n), then OpenGL -> OpenCV
     # camera axes by flipping y and z.

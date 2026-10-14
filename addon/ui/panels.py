@@ -1,6 +1,7 @@
 import bpy
 from ..operators.export_geometry_maps import conversion_progress
 from ..operators.export_pointcloud import scannable_meshes
+from ..utils.compositor_passes import maps_enabled
 
 
 VERSION = "1.3.0"
@@ -175,8 +176,8 @@ class VIEW3D_PT_helper_mesh_panel(bpy.types.Panel):
             body.prop(scene.cycles, "device")
             body.prop(scene.render, "use_persistent_data")
 
-        maps_enabled = scene.export_depth_maps or scene.export_normal_maps
-        workbench_blocked = maps_enabled and scene.render.engine == "BLENDER_WORKBENCH"
+        convert_maps = maps_enabled(scene)
+        workbench_blocked = convert_maps and scene.render.engine == "BLENDER_WORKBENCH"
         if workbench_blocked:
             body.label(text="Maps need Cycles or EEVEE", icon="ERROR")
 
@@ -191,7 +192,7 @@ class VIEW3D_PT_helper_mesh_panel(bpy.types.Panel):
             row = body.row(align=True)
             row.progress(factor=fraction, type="BAR", text=label)
             row.operator("export.geometry_maps_cancel", text="", icon="X")
-        elif maps_enabled:
+        elif convert_maps:
             # Render Animation converts the passes itself; this is for
             # frames rendered elsewhere
             col = body.column(align=True)

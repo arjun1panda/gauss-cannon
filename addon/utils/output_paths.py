@@ -55,6 +55,11 @@ def render_image_extension(scene):
     return format_map.get(scene.render.image_settings.file_format, '.png')
 
 
+def rendered_frames(scene):
+    """Frame numbers Render Animation renders, in order."""
+    return list(range(scene.frame_start, scene.frame_end + 1, scene.frame_step))
+
+
 def sync_render_outputs(scene, blend_path=None):
     """Point the scene's render output at <output_folder>/images/ and the
     depth/normal pass outputs at <output_folder>/_passes/."""

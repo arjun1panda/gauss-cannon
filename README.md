@@ -136,9 +136,11 @@ an existing one.
 ```
 
 The pass setup is saved in the .blend (view-layer passes plus compositor File
-Output nodes), so a render farm produces the `_passes/` EXRs without the add-on
-installed. After the farm finishes, click "Convert Rendered Passes".
-Unticking both removes the compositor nodes again.
+Output nodes, with compositing turned on), so a render farm produces the
+`_passes/` EXRs without the add-on installed. After the farm finishes, click
+"Convert Rendered Passes". It converts the frames in the current frame range
+and removes maps left over from frames outside it. Unticking both removes the
+compositor nodes again and restores the earlier pass and compositing settings.
 
 For depth supervision in LichtFeld Studio, the point cloud also needs to be dense
 enough: at least 1024 rays per frame (Ray Density 32+). The panel warns when it
