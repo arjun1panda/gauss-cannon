@@ -5,7 +5,7 @@
 [![Blender Version](https://img.shields.io/badge/Blender-5.0.0%2B-orange.svg)](https://www.blender.org/)
 [![License](https://img.shields.io/badge/License-GPL_v3.0-blue.svg)](LICENSE)
 
-![Interface Screenshot](gauss-cannon-screenshot.webp)
+<img src="gauss-cannon-screenshot.webp" alt="Interface Screenshot" width="300">
 
 # Overview
 
