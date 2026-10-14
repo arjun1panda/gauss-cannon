@@ -11,7 +11,7 @@
 
 **Gauss Cannon** is a comprehensive Blender add-on that streamlines the creation of camera paths and point clouds for Gaussian Splatting and photogrammetry workflows. It provides an intuitive interface for defining camera positions based on mesh faces and exports data in formats compatible with popular 3D reconstruction pipelines.
 
-Created/Maintained by [Arash Keshmirian](https://github.com/keshmirian)
+Created/Maintained by [Arash Keshmirian](https://github.com/keshmirian) at [Warpgate Labs](https://warp-gate.com)
 
 # Features
 
